@@ -1,0 +1,166 @@
+import os
+from datetime import datetime
+
+import streamlit as st
+from dotenv import load_dotenv
+from google import genai
+from google.oauth2 import service_account
+
+load_dotenv(".env", override=True)
+
+MODEL = os.getenv("GOOGLE_GENAI_MODEL", "gemini-3.8-flash")
+
+# Gemini 3.8 Flash Standardpreise (USD / 1 Mio. Tokens)
+INPUT_PRICE = 0.75
+OUTPUT_PRICE = 3.75
+
+st.set_page_config(
+    page_title="Gemini Cost Dashboard",
+    page_icon="💰",
+    layout="wide"
+)
+
+st.title("💰 Gemini API Cost Dashboard")
+st.caption(f"Model: {MODEL}")
+
+# Client initialisieren
+@st.cache_resource
+def get_client():
+    if os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+        credentials = service_account.Credentials.from_service_account_file(
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"],
+            scopes=["https://www.googleapis.com/auth/cloud-platform"]
+        )
+
+        return genai.Client(
+            vertexai=True,
+            project=os.environ["GOOGLE_CLOUD_PROJECT"],
+            location=os.getenv("GOOGLE_CLOUD_LOCATION", "global"),
+            credentials=credentials
+        )
+
+    return genai.Client(
+        vertexai=False,
+        api_key=os.environ["GEMINI_API_KEY"]
+    )
+
+
+if "history" not in st.session_state:
+    st.session_state.history = []
+
+if "total_cost" not in st.session_state:
+    st.session_state.total_cost = 0.0
+
+
+# Prompt-Eingabe
+prompt = st.text_area(
+    "Dein Prompt",
+    placeholder="Stelle Gemini eine Frage...",
+    height=120
+)
+
+if st.button("🚀 Anfrage senden", type="primary"):
+
+    if not prompt.strip():
+        st.warning("Bitte einen Prompt eingeben.")
+
+    else:
+        try:
+            with st.spinner("Gemini verarbeitet deine Anfrage..."):
+
+                client = get_client()
+
+                response = client.models.generate_content(
+                    model=MODEL,
+                    contents=prompt
+                )
+
+                usage = response.usage_metadata
+
+                input_tokens = usage.prompt_token_count or 0
+                output_tokens = (
+                    (usage.candidates_token_count or 0)
+                    + (getattr(usage, "thoughts_token_count", 0) or 0)
+                )
+
+                input_cost = (
+                    input_tokens / 1_000_000
+                ) * INPUT_PRICE
+
+                output_cost = (
+                    output_tokens / 1_000_000
+                ) * OUTPUT_PRICE
+
+                request_cost = input_cost + output_cost
+
+                st.session_state.total_cost += request_cost
+
+                st.session_state.history.append({
+                    "time": datetime.now().strftime("%H:%M:%S"),
+                    "input": input_tokens,
+                    "output": output_tokens,
+                    "cost": request_cost
+                })
+
+            st.success("Anfrage erfolgreich!")
+
+            st.subheader("Gemini Antwort")
+            st.write(response.text)
+
+            st.divider()
+
+            st.subheader("Kosten dieser Anfrage")
+
+            col1, col2, col3 = st.columns(3)
+
+            col1.metric("Input Tokens", f"{input_tokens:,}")
+            col2.metric("Output Tokens", f"{output_tokens:,}")
+            col3.metric("Kosten", f"${request_cost:.8f}")
+
+        except Exception as e:
+            st.error(f"API Fehler: {e}")
+
+
+# Dashboard
+st.divider()
+st.header("📊 Kostenübersicht")
+
+total_requests = len(st.session_state.history)
+total_input = sum(x["input"] for x in st.session_state.history)
+total_output = sum(x["output"] for x in st.session_state.history)
+
+col1, col2, col3, col4 = st.columns(4)
+
+col1.metric(
+    "Gesamtkosten",
+    f"${st.session_state.total_cost:.6f}"
+)
+
+col2.metric(
+    "API Anfragen",
+    total_requests
+)
+
+col3.metric(
+    "Input Tokens",
+    f"{total_input:,}"
+)
+
+col4.metric(
+    "Output Tokens",
+    f"{total_output:,}"
+)
+
+if st.session_state.history:
+
+    st.subheader("📈 Anfrageverlauf")
+
+    st.dataframe(
+        list(reversed(st.session_state.history)),
+        use_container_width=True
+    )
+
+    if st.button("Kostenverlauf zurücksetzen"):
+        st.session_state.history = []
+        st.session_state.total_cost = 0.0
+        st.rerun()
